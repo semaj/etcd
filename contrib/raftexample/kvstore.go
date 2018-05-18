@@ -18,16 +18,19 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
+	"github.com/coreos/etcd/raftsnap"
 	"log"
 	"sync"
-
-	"github.com/coreos/etcd/raftsnap"
+	"time"
 )
 
 // a key-value store backed by raft
 type kvstore struct {
+	startTimes  map[string]time.Time
+	latencies   []time.Duration
 	proposeC    chan<- string // channel for proposing updates
 	mu          sync.RWMutex
+	timeLock    sync.Mutex
 	kvStore     map[string]string // current committed key-value pairs
 	snapshotter *raftsnap.Snapshotter
 }
@@ -38,7 +41,13 @@ type kv struct {
 }
 
 func newKVStore(snapshotter *raftsnap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *kvstore {
-	s := &kvstore{proposeC: proposeC, kvStore: make(map[string]string), snapshotter: snapshotter}
+	s := &kvstore{
+		proposeC:    proposeC,
+		kvStore:     make(map[string]string),
+		snapshotter: snapshotter,
+		startTimes:  make(map[string]time.Time),
+		latencies:   make([]time.Duration, 0),
+	}
 	// replay log into key-value map
 	s.readCommits(commitC, errorC)
 	// read commits from raft into kvStore map until error
@@ -54,11 +63,15 @@ func (s *kvstore) Lookup(key string) (string, bool) {
 }
 
 func (s *kvstore) Propose(k string, v string) {
+	// start timer here
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
 		log.Fatal(err)
 	}
+	s.timeLock.Lock()
+	s.startTimes[k] = time.Now()
 	s.proposeC <- buf.String()
+	s.timeLock.Unlock()
 }
 
 func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
@@ -85,9 +98,14 @@ func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
 		if err := dec.Decode(&dataKv); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
+		s.timeLock.Lock()
+		t := time.Since(s.startTimes[dataKv.Key])
+		s.latencies = append(s.latencies, t)
+		s.timeLock.Unlock()
 		s.mu.Lock()
 		s.kvStore[dataKv.Key] = dataKv.Val
 		s.mu.Unlock()
+		// end timer here
 	}
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)

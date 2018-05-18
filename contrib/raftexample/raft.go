@@ -103,6 +103,12 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		snapshotterReady: make(chan *raftsnap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
+	f, err := os.OpenFile("logs/"+strconv.Itoa(id)+".log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	defer f.Close()
+	log.SetOutput(f)
 	go rc.startRaft()
 	return commitC, errorC, rc.snapshotterReady
 }

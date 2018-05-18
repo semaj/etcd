@@ -16,16 +16,21 @@ package main
 
 import (
 	"flag"
-	"strings"
-
+	"fmt"
 	"github.com/coreos/etcd/raft/raftpb"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 )
 
 func main() {
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
-	kvport := flag.Int("port", 9121, "key-value server port")
+	//kvport := flag.Int("port", 9121, "port")
+	wait := *flag.String("wait", "10ms", "10ms, 50ms, 1s, etc")
 	join := flag.Bool("join", false, "join an existing cluster")
+	limit := *flag.Int("limit", 1000, "number of appends")
 	flag.Parse()
 
 	proposeC := make(chan string)
@@ -40,6 +45,43 @@ func main() {
 
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
+	//serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
+	time.Sleep(3000 * time.Millisecond)
+	increment := 0
+	if *id == 1 {
+		duration, err := time.ParseDuration(wait)
+		if err != nil {
+			os.Exit(1)
+		}
+		waitTicker := time.NewTicker(duration)
+		go func() {
+			for range waitTicker.C {
+				if increment >= limit {
+					break
+				}
+				sIncrement := strconv.Itoa(increment)
+				kvs.Propose(sIncrement, sIncrement)
+				increment++
+			}
+		}()
+	}
+	start := time.Now()
+	finishTicker := time.NewTicker(10 * time.Millisecond)
+	for range finishTicker.C {
+		size := len(kvs.kvStore)
+		if size >= limit {
+			elapsed := time.Since(start).Seconds()
+			fmt.Print("BLAST:")
+			fmt.Print(float64(size) / elapsed)
+			if *id == 1 {
+				for _, latency := range kvs.latencies {
+					fmt.Print(",", latency.Seconds())
+				}
+			}
+			fmt.Println("")
+			time.Sleep(10000 * time.Millisecond)
+			os.Exit(0)
+		}
+	}
 	// the key-value http handler will propose updates to raft
-	serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
 }
