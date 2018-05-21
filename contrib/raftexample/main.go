@@ -27,7 +27,7 @@ import (
 func main() {
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
-	//kvport := flag.Int("port", 9121, "port")
+	appendIndex := flag.Int("appendIndex", 1, "append index")
 	wait := *flag.String("wait", "10ms", "10ms, 50ms, 1s, etc")
 	join := flag.Bool("join", false, "join an existing cluster")
 	limit := *flag.Int("limit", 1000, "number of appends")
@@ -43,37 +43,48 @@ func main() {
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
 	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
 
-	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+	reader := make(chan string, 100000)
+	sizeReader := make(chan int, 100000)
+	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC, reader, sizeReader)
 
-	//serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
-	time.Sleep(3000 * time.Millisecond)
+	time.Sleep(10000 * time.Millisecond)
 	increment := 0
-	if *id == 1 {
+	canAppend := true
+	start := time.Now()
+	if *id <= *appendIndex {
 		duration, err := time.ParseDuration(wait)
 		if err != nil {
 			os.Exit(1)
 		}
-		waitTicker := time.NewTicker(duration)
 		go func() {
-			for range waitTicker.C {
+			for {
+				sNewValue := <-reader
+				newValue, _ := strconv.Atoi(sNewValue)
+				increment = newValue + 1
+				canAppend = true
+			}
+		}()
+		appendTicker := time.NewTicker(duration)
+		go func() {
+			for range appendTicker.C {
 				if increment >= limit {
 					break
 				}
-				sIncrement := strconv.Itoa(increment)
-				kvs.Propose(sIncrement, sIncrement)
-				increment++
+				if canAppend {
+					sIncrement := strconv.Itoa(increment)
+					kvs.Propose(sIncrement, sIncrement)
+					canAppend = false
+				}
 			}
 		}()
 	}
-	start := time.Now()
-	finishTicker := time.NewTicker(10 * time.Millisecond)
-	for range finishTicker.C {
-		size := len(kvs.kvStore)
+	for {
+		size := <-sizeReader
 		if size >= limit {
 			elapsed := time.Since(start).Seconds()
 			fmt.Print("BLAST:")
 			fmt.Print(float64(size) / elapsed)
-			if *id == 1 {
+			if *id <= *appendIndex {
 				for _, latency := range kvs.latencies {
 					fmt.Print(",", latency.Seconds())
 				}

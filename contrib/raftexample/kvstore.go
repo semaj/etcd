@@ -40,7 +40,7 @@ type kv struct {
 	Val string
 }
 
-func newKVStore(snapshotter *raftsnap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *kvstore {
+func newKVStore(snapshotter *raftsnap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, reader chan string, sizeReader chan int) *kvstore {
 	s := &kvstore{
 		proposeC:    proposeC,
 		kvStore:     make(map[string]string),
@@ -49,9 +49,9 @@ func newKVStore(snapshotter *raftsnap.Snapshotter, proposeC chan<- string, commi
 		latencies:   make([]time.Duration, 0),
 	}
 	// replay log into key-value map
-	s.readCommits(commitC, errorC)
+	s.readCommits(commitC, errorC, reader, sizeReader)
 	// read commits from raft into kvStore map until error
-	go s.readCommits(commitC, errorC)
+	go s.readCommits(commitC, errorC, reader, sizeReader)
 	return s
 }
 
@@ -74,7 +74,7 @@ func (s *kvstore) Propose(k string, v string) {
 	s.timeLock.Unlock()
 }
 
-func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
+func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error, reader chan string, sizeReader chan int) {
 	for data := range commitC {
 		if data == nil {
 			// done replaying log; new data incoming
@@ -99,11 +99,16 @@ func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
 		s.timeLock.Lock()
-		t := time.Since(s.startTimes[dataKv.Key])
-		s.latencies = append(s.latencies, t)
+		start, ok := s.startTimes[dataKv.Key]
+		if ok {
+			t := time.Since(start)
+			s.latencies = append(s.latencies, t)
+		}
 		s.timeLock.Unlock()
 		s.mu.Lock()
 		s.kvStore[dataKv.Key] = dataKv.Val
+		reader <- dataKv.Key
+		sizeReader <- len(s.kvStore)
 		s.mu.Unlock()
 		// end timer here
 	}
